@@ -1,273 +1,994 @@
 import 'package:flutter/material.dart';
+import 'package:schedule_app/service/gemini_service.dart';
+import 'package:schedule_app/color.dart';
+import 'package:schedule_app/models/task.dart';
+import 'package:intl/intl.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:path_provider/path_provider.dart';
+import 'dart:io';
+import 'package:timezone/data/latest_all.dart' as tz;
+import 'package:timezone/timezone.dart' as tz;
 
-class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+class HomePage extends StatefulWidget {
+  const HomePage({super.key});
 
   @override
-  State<HomeScreen> createState() => _HomeScreenState();
+  State<HomePage> createState() => _HomePageState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
-  final List<Map<String, dynamic>> tasks = [];
-  final TextEditingController taskController = TextEditingController();
-  final TextEditingController durationController = TextEditingController();
-  String? priority;
+class _HomePageState extends State<HomePage> {
+  final List<Task> tasks = [];
   bool isLoading = false;
-  String generatedSchedule = '';
-  String errorMessage = '';
+  String scheduleResult = "";
+  String? priority;
+  TimeOfDay? selectedTime;
+  final taskController = TextEditingController();
+  final durationController = TextEditingController();
+  final _formKey = GlobalKey<FormState>();
+  final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
+  FlutterLocalNotificationsPlugin();
 
-  void addTask() {
-    if (taskController.text.isNotEmpty &&
-        priority != null &&
-        durationController.text.isNotEmpty) {
-      final duration = int.tryParse(durationController.text);
-      if (duration == null || duration <= 0) {
-        setState(() {
-          errorMessage = 'Durasi harus berupa angka positif.';
-        });
-        return;
-      }
+  // Warna-warna baru
+ Color primaryColor = Color(0xFF6200EA); // Warna ungu
+ Color secondaryColor = Colors.grey; // Warna abu-abu
+ Color buttonColor = Color(0xFF018786); // Warna hijau gelap
+ Color borderColor = Color(0xFFB0BEC5); // Warna abu-abu muda
 
-      setState(() {
-        tasks.add({
-          "name": taskController.text,
-          "priority": priority,
-          "minutes": duration,
-        });
-        errorMessage = ''; // Clear any previous error message
-      });
-      taskController.clear();
-      durationController.clear();
-      priority = null;
-    } else {
-      setState(() {
-        errorMessage = 'Harap isi semua field.';
-      });
-    }
+  @override
+  void initState() {
+    super.initState();
+    tz.initializeTimeZones(); // Inisialisasi zona waktu
+    _initializeNotifications(); // Inisialisasi notifikasi
   }
 
-  Future<void> _generateSchedule() async {
-    setState(() {
-      isLoading = true;
-      errorMessage = ''; // Clear any previous error message
-    });
+  void _initializeNotifications() async {
+    const AndroidInitializationSettings initializationSettingsAndroid =
+    AndroidInitializationSettings('@mipmap/ic_launcher');
+    final InitializationSettings initializationSettings =
+    InitializationSettings(android: initializationSettingsAndroid);
+    await flutterLocalNotificationsPlugin.initialize(initializationSettings);
+  }
+
+  void _scheduleNotification(Task task) async {
     try {
-      final schedule = ;
-      setState(() {
-        generatedSchedule = schedule;
-      });
+      final time = _parseTimeOfDay(task.deadline);
+      if (time != null) {
+        final now = tz.TZDateTime.now(tz.local);
+        var scheduledTime = tz.TZDateTime(
+          tz.local,
+          now.year,
+          now.month,
+          now.day,
+          time.hour,
+          time.minute,
+        );
+
+        // Jika waktu yang dijadwalkan sudah lewat, tambahkan 1 hari
+        if (scheduledTime.isBefore(now)) {
+          scheduledTime = scheduledTime.add(Duration(days: 1));
+        }
+
+        final androidPlatformChannelSpecifics = AndroidNotificationDetails(
+          'your_channel_id',
+          'your_channel_name',
+          importance: Importance.max,
+          priority: Priority.high,
+        );
+
+        final platformChannelSpecifics = NotificationDetails(
+          android: androidPlatformChannelSpecifics,
+        );
+
+        await flutterLocalNotificationsPlugin.zonedSchedule(
+          task.hashCode,
+          'Task Reminder',
+          'You have a task: ${task.name}',
+          scheduledTime,
+          platformChannelSpecifics,
+          androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+          uiLocalNotificationDateInterpretation:
+          UILocalNotificationDateInterpretation.absoluteTime,
+        );
+      }
     } catch (e) {
-      setState(() {
-        errorMessage = 'Gagal menghasilkan jadwal: ${e.toString()}';
-      });
-    } finally {
-      setState(() {
-        isLoading = false;
-      });
+      debugPrint("Error scheduling notification: $e");
     }
   }
+
+
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(
-          'Schedule App',
+        title: const Text(
+          "NeedTask",
           style: TextStyle(
-            color: Colors.grey[800],
-            fontSize: 32,
-            fontFamily: 'Poppins',
-            fontWeight: FontWeight.bold,
+            fontWeight: FontWeight.w600,
+            fontSize: 24,
+            color: Colors.white,
           ),
         ),
+        backgroundColor: primaryColor,
+        elevation: 0,
         centerTitle: true,
-        backgroundColor: Colors.white,
-        elevation: 4,
+        actions: [
+          IconButton(
+            icon: Icon(Icons.file_upload, color: Colors.white),
+            onPressed: _exportSchedule,
+          ),
+        ],
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(16.0),
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              primaryColor.withOpacity(0.1),
+              const Color(0xFFECEFF1),
+            ],
+          ),
+        ),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _buildScheduleResult(),
+              const SizedBox(height: 24),
+              _buildTaskListCard(),
+              const SizedBox(height: 24),
+              _buildInputCard(),
+
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildInputCard() {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.1),
+            blurRadius: 20,
+            offset: const Offset(0, 10),
+          ),
+        ],
+      ),
+      padding: const EdgeInsets.all(24),
+      child: Form(
+        key: _formKey,
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Input Section
-            Card(
-              elevation: 4,
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  children: [
-                    TextField(
-                      controller: taskController,
-                      decoration: const InputDecoration(
-                        labelText: 'Nama Tugas',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    TextField(
-                      controller: durationController,
-                      decoration: const InputDecoration(
-                        labelText: 'Durasi (menit)',
-                        border: OutlineInputBorder(),
-                      ),
-                      keyboardType: TextInputType.number,
-                    ),
-                    const SizedBox(height: 16),
-                    TextField(
-                      decoration: const InputDecoration(
-                        labelText: 'Deadline',
-                        border: OutlineInputBorder(),
-                      ),
-                      keyboardType: TextInputType.number,
-                    ),
-                    const SizedBox(height: 16),
-                    DropdownButtonFormField<String>(
-                      decoration: const InputDecoration(
-                        labelText: 'Prioritas',
-                        border: OutlineInputBorder(),
-                      ),
-                      value: priority,
-                      items: ['Rendah', 'Sedang', 'Tinggi'].map((String value) {
-                        return DropdownMenuItem<String>(
-                          value: value,
-                          child: Text(value),
-                        );
-                      }).toList(),
-                      onChanged: (newValue) {
-                        setState(() {
-                          priority = newValue;
-                        });
-                      },
-                      validator: (value) {
-                        if (value == null) {
-                          return 'Pilih prioritas';
-                        }
-                        return null;
-                      },
-                    ),
-                    const SizedBox(height: 16),
-                    ElevatedButton(
-                      onPressed: addTask,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.blue,
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 24, vertical: 12),
-                      ),
-                      child: const Text('Tambah Tugas'),
-                    ),
-                  ],
+            Row(
+              children: [
+                Icon(Icons.add_circle_outline, color: primaryColor, size: 28),
+                const SizedBox(width: 12),
+                const Text(
+                  "New Task",
+                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                ),
+              ],
+            ),
+            const SizedBox(height: 20),
+            _buildTextFormField(
+              controller: taskController,
+              label: "Task Name",
+              icon: Icons.edit_note,
+              validator: (value) {
+                if (value == null || value.isEmpty) {
+                  return 'Please enter task name';
+                }
+                return null;
+              },
+            ),
+            const SizedBox(height: 16),
+            _buildTextFormField(
+              controller: durationController,
+              label: "Duration (minutes)",
+              icon: Icons.timer,
+              isNumeric: true,
+              validator: (value) {
+                if (value == null || value.isEmpty) {
+                  return 'Please enter duration';
+                }
+                if (int.tryParse(value) == null) {
+                  return 'Please enter a valid number';
+                }
+                return null;
+              },
+            ),
+            const SizedBox(height: 16),
+            _buildTimePickerField(),
+            const SizedBox(height: 16),
+            _buildPrioritySelector(),
+            const SizedBox(height: 24),
+            _buildAddButton(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTextFormField({
+    required TextEditingController controller,
+    required String label,
+    bool isNumeric = false,
+    IconData? icon,
+    String? Function(String?)? validator,
+  }) {
+    return TextFormField(
+      controller: controller,
+      keyboardType: isNumeric ? TextInputType.number : TextInputType.text,
+      validator: validator,
+      decoration: InputDecoration(
+        labelText: label,
+        labelStyle: TextStyle(color: secondaryColor),
+        prefixIcon:Icon(Icons.edit_note, color: primaryColor),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: BorderSide(color: borderColor),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: BorderSide(color: primaryColor),
+        ),
+        filled: true,
+        fillColor: const Color(0xFFF5F5F5),
+      ),
+    );
+  }
+
+  Widget _buildTimePickerField() {
+    return InkWell(
+      onTap: () async {
+        final TimeOfDay? time = await showTimePicker(
+          context: context,
+          initialTime: TimeOfDay.now(),
+          builder: (context, child) {
+            return Theme(
+              data: Theme.of(context).copyWith(
+                colorScheme: ColorScheme.light(
+                  primary: primaryColor,
+                  onPrimary: Colors.white,
+                  surface: Colors.white,
+                  onSurface: Colors.black,
                 ),
               ),
+              child: child!,
+            );
+          },
+        );
+        if (time != null) {
+          setState(() => selectedTime = time);
+        }
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 15),
+        decoration: BoxDecoration(
+          border: Border.all(color: borderColor),
+          borderRadius: BorderRadius.circular(10),
+          color: const Color(0xFFF5F5F5),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.schedule, color: primaryColor),
+            const SizedBox(width: 12),
+            Text(
+              selectedTime != null
+                  ? selectedTime!.format(context)
+                  : "Select Deadline Time",
+              style: TextStyle(
+                color: selectedTime != null ? Colors.black : secondaryColor,
+                fontSize: 16,
+              ),
             ),
+          ],
+        ),
+      ),
+    );
+  }
 
-            const SizedBox(height: 24),
+  Widget _buildPrioritySelector() {
+    return DropdownButtonFormField<String>(
+      value: priority,
+      decoration: InputDecoration(
+        labelText: "Priority",
+        prefixIcon: Icon(Icons.flag_circle, color: primaryColor),
+        border: OutlineInputBorder(
+          borderSide: BorderSide(color: borderColor),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderSide: BorderSide(color: primaryColor, width: 1),
+        ),
+        contentPadding: const EdgeInsets.symmetric(vertical: 16, horizontal: 12),
+      ),
+      hint: const Text("Select Priority"),
+      items: ["High", "Medium", "Low"].map((priorityValue) {
+        Color priorityColor;
+        switch (priorityValue) {
+          case "High":
+            priorityColor = Colors.red;
+            break;
+          case "Medium":
+            priorityColor = Colors.orange;
+            break;
+          default:
+            priorityColor = Colors.green;
+        }
+        return DropdownMenuItem(
+          value: priorityValue,
+          child: Row(
+            children: [
+              Container(
+                width: 12,
+                height: 12,
+                decoration: BoxDecoration(
+                  color: priorityColor,
+                  shape: BoxShape.circle,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(priorityValue),
+            ],
+          ),
+        );
+      }).toList(),
+      onChanged: (value) => setState(() => priority = value),
+      validator: (value) {
+        if (value == null) {
+          return 'Please select a priority';
+        }
+        return null;
+      },
+    );
+  }
 
-            // Task List Section
-            Expanded(
-              child: tasks.isEmpty
-                  ? const Center(
-                child: Text(
-                  'Belum ada tugas.',
+  Widget _buildAddButton() {
+    return SizedBox(
+      width: double.infinity,
+      child: ElevatedButton(
+        onPressed: () {
+          if (_formKey.currentState!.validate() && selectedTime != null) {
+            _addTask();
+          } else {
+            if (selectedTime == null) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: const Text('Please select a deadline time'),
+                  backgroundColor: Colors.red[400],
+                  behavior: SnackBarBehavior.floating,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  margin: const EdgeInsets.all(20),
+                ),
+              );
+            }
+          }
+        },
+        style: ElevatedButton.styleFrom(
+          backgroundColor: buttonColor,
+          padding: const EdgeInsets.symmetric(vertical: 16),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(10),
+          ),
+          elevation: 0,
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: const [
+            Icon(Icons.add_circle_outline, color: Colors.white),
+            SizedBox(width: 8),
+            Text(
+              "Add Task",
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+                color: Colors.white,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+  void _addTask() {
+    setState(() {
+      tasks.add(Task(
+        name: taskController.text,
+        priority: priority!,
+        duration: int.tryParse(durationController.text) ?? 5,
+        deadline: selectedTime!.format(context),
+      ));
+      _scheduleNotification(tasks.last);
+    });
+    _clearInputs();
+  }
+
+  void _clearInputs() {
+    taskController.clear();
+    durationController.clear();
+    setState(() {
+      selectedTime = null;
+      priority = null;
+    });
+  }
+
+  Widget _buildTaskListCard() {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(10),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.1),
+            blurRadius: 20,
+            offset: const Offset(0, 10),
+          ),
+        ],
+      ),
+      padding: const EdgeInsets.all(24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.view_list, color: primaryColor, size: 28),
+              const SizedBox(width: 12),
+              const Text(
+                "Your Tasks",
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
+          tasks.isEmpty
+              ? Center(
+            child: Column(
+              children: [
+                Icon(
+                  Icons.note_add,
+                  size: 48,
+                  color: secondaryColor,
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  "No tasks added yet",
                   style: TextStyle(
-                    color: Colors.grey,
+                    color: secondaryColor,
                     fontSize: 16,
                   ),
                 ),
-              )
-                  : ListView.builder(
-                itemCount: tasks.length,
-                itemBuilder: (context, index) {
-                  final task = tasks[index];
-                  return Card(
-                    margin: const EdgeInsets.only(bottom: 8),
-                    elevation: 2,
-                    child: ListTile(
-                      title: Text(
-                        task['name'],
-                        style: const TextStyle(
-                          fontWeight: FontWeight.bold,
-                        ),
+              ],
+            ),
+          )
+              : ReorderableListView.builder(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            itemCount: tasks.length,
+            itemBuilder: (context, index) {
+              final task = tasks[index];
+              Color priorityColor;
+              switch (task.priority) {
+                case "High":
+                  priorityColor = Colors.red;
+                  break;
+                case "Medium":
+                  priorityColor = Colors.orange;
+                  break;
+                default:
+                  priorityColor = Colors.green;
+              }
+              return Container(
+                key: Key('$index'),
+                margin: const EdgeInsets.only(bottom: 12),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(8),
+                  color: const Color(0xFFF5F5F5),
+                  border: Border.all(color: borderColor),
+                ),
+                child: ListTile(
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 4,
+                  ),
+                  leading: Container(
+                    width: 4,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: priorityColor,
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                  ),
+                  title: Text(
+                    task.name,
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                    ),
+                  ),
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const SizedBox(height: 4),
+                      Row(
+                        children: [
+                          Icon(
+                            Icons.timer_outlined,
+                            size: 16,
+                            color: secondaryColor,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            "${task.duration} min",
+                            style: TextStyle(color: secondaryColor),
+                          ),
+                          const SizedBox(width: 12),
+                          Icon(
+                            Icons.access_time,
+                            size: 16,
+                            color: secondaryColor,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            task.deadline,
+                            style: TextStyle(color: secondaryColor),
+                          ),
+                        ],
                       ),
-                      subtitle: Text(
-                        'Prioritas: ${task['priority']}, Durasi: ${task['minutes']} menit',
+                    ],
+                  ),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        icon: Icon(Icons.edit_note, color: secondaryColor), // Ikon edit
+                        onPressed: () {
+                          _showEditDialog(task, index);
+                        },
                       ),
-                      trailing: IconButton(
-                        icon: const Icon(Icons.delete, color: Colors.red),
+                      IconButton(
+                        icon: Icon(Icons.delete_forever, color: Colors.red[400]), // Ikon hapus
                         onPressed: () {
                           setState(() {
                             tasks.removeAt(index);
                           });
                         },
                       ),
-                    ),
-                  );
-                },
-              ),
-            ),
-
-            const SizedBox(height: 16),
-
-            // Generate Schedule Button
-            if (tasks.isNotEmpty)
-              ElevatedButton(
-                onPressed: isLoading ? null : _generateSchedule,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.green,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 24, vertical: 12),
-                ),
-                child: isLoading
-                    ? const SizedBox(
-                  width: 24,
-                  height: 24,
-                  child: CircularProgressIndicator(
-                    color: Colors.white,
-                  ),
-                )
-                    : const Text('Generate Schedule'),
-              ),
-
-            const SizedBox(height: 16),
-
-            // Generated Schedule Section
-            if (generatedSchedule.isNotEmpty)
-              Card(
-                elevation: 4,
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'Jadwal yang Dihasilkan:',
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 16,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(generatedSchedule),
                     ],
                   ),
                 ),
-              ),
+              );
+            },
+            onReorder: (oldIndex, newIndex) {
+              setState(() {
+                if (oldIndex < newIndex) {
+                  newIndex -= 1;
+                }
+                final Task task = tasks.removeAt(oldIndex);
+                tasks.insert(newIndex, task);
+              });
+            },
+          ),
+        ],
+      ),
+    );
+  }
 
-            // Error Message
-            if (errorMessage.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                child: Text(
-                  errorMessage,
-                  style: const TextStyle(
-                    color: Colors.red,
-                    fontSize: 14,
-                  ),
+  void _showEditDialog(Task task, int index) {
+    final editTaskController = TextEditingController(text: task.name);
+    final editDurationController =
+    TextEditingController(text: task.duration.toString());
+    String? editPriority = task.priority;
+    TimeOfDay? editTime = _parseTimeOfDay(task.deadline);
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        final _editFormKey = GlobalKey<FormState>();
+        return AlertDialog(
+          title: const Text(
+            "Edit Task",
+            style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+          ),
+          content: SizedBox(
+            width: MediaQuery.of(context).size.width * 0.8, // Lebar modal
+            child: Form(
+              key: _editFormKey,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SizedBox(
+                      width: double.infinity, // Lebar penuh
+                      child: TextFormField(
+                        controller: editTaskController,
+                        decoration: InputDecoration(
+                          labelText: "Task Name",
+                          prefixIcon: Icon(Icons.edit_note, color: primaryColor),
+                          enabledBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(4),
+                            borderSide: BorderSide(color: borderColor),
+                          ),
+                        ),
+                        validator: (value) {
+                          if (value == null || value.isEmpty) {
+                            return 'Please enter task name';
+                          }
+                          return null;
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity, // Lebar penuh
+                      child: TextFormField(
+                        controller: editDurationController,
+                        decoration: InputDecoration(
+                          labelText: "Duration (minutes)",
+                          prefixIcon: Icon(Icons.timer, color: primaryColor),
+                          enabledBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(4),
+                            borderSide: BorderSide(color: borderColor),
+                          ),
+                        ),
+                        keyboardType: TextInputType.number,
+                        validator: (value) {
+                          if (value == null || value.isEmpty) {
+                            return 'Please enter duration';
+                          }
+                          if (int.tryParse(value) == null) {
+                            return 'Please enter a valid number';
+                          }
+                          return null;
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity, // Lebar penuh
+                      child: InkWell(
+                        onTap: () async {
+                          final TimeOfDay? time = await showTimePicker(
+                            context: context,
+                            initialTime: editTime ?? TimeOfDay.now(),
+                            builder: (context, child) {
+                              return Theme(
+                                data: Theme.of(context).copyWith(
+                                  colorScheme: ColorScheme.light(
+                                    primary: primaryColor,
+                                    onPrimary: Colors.white,
+                                    surface: Colors.white,
+                                    onSurface: Colors.black,
+                                  ),
+                                ),
+                                child: child!,
+                              );
+                            },
+                          );
+                          if (time != null) {
+                            setState(() => editTime = time);
+                          }
+                        },
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 15),
+                          decoration: BoxDecoration(
+                            border: Border.all(color: borderColor),
+                            borderRadius: BorderRadius.circular(4),
+                            color: const Color(0xFFF5F5F5),
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(Icons.access_time, color: primaryColor),
+                              const SizedBox(width: 12),
+                              Text(
+                                editTime != null
+                                    ? editTime!.format(context)
+                                    : "Select Deadline Time",
+                                style: TextStyle(
+                                  color: editTime != null
+                                      ? Colors.black
+                                      : secondaryColor,
+                                  fontSize: 16,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity, // Lebar penuh
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        decoration: BoxDecoration(
+                          border: Border.all(color: borderColor),
+                          borderRadius: BorderRadius.circular(4),
+                          color: const Color(0xFFF5F5F5),
+                        ),
+                        child: DropdownButtonHideUnderline(
+                          child: DropdownButtonFormField<String>(
+                            value: editPriority,
+                            decoration: InputDecoration(
+                              prefixIcon: Icon(Icons.flag, color: primaryColor),
+                              border: InputBorder.none,
+                            ),
+                            hint: const Text("Select Priority"),
+                            items: ["High", "Medium", "Low"].map((priorityValue) {
+                              Color priorityColor;
+                              switch (priorityValue) {
+                                case "High":
+                                  priorityColor = Colors.red;
+                                  break;
+                                case "Medium":
+                                  priorityColor = Colors.orange;
+                                  break;
+                                default:
+                                  priorityColor = Colors.green;
+                              }
+                              return DropdownMenuItem(
+                                value: priorityValue,
+                                child: Row(
+                                  children: [
+                                    Container(
+                                      width: 12,
+                                      height: 12,
+                                      decoration: BoxDecoration(
+                                        color: priorityColor,
+                                        shape: BoxShape.circle,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Text(priorityValue),
+                                  ],
+                                ),
+                              );
+                            }).toList(),
+                            onChanged: (value) =>
+                                setState(() => editPriority = value),
+                            validator: (value) {
+                              if (value == null) {
+                                return 'Please select a priority';
+                              }
+                              return null;
+                            },
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text(
+                "Cancel",
+                style: TextStyle(color: secondaryColor),
+              ),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                if (_editFormKey.currentState!.validate() && editTime != null) {
+                  setState(() {
+                    tasks[index] = Task(
+                      name: editTaskController.text,
+                      priority: editPriority!,
+                      duration: int.tryParse(editDurationController.text) ?? 5,
+                      deadline: editTime!.format(context),
+                    );
+                  });
+                  Navigator.pop(context);
+                } else {
+                  if (editTime == null) {
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                      content: const Text('Please select a deadline time'),
+                      backgroundColor: Colors.red[400],
+                      behavior: SnackBarBehavior.floating,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      margin: const EdgeInsets.all(20),
+                    ));
+                  }
+                }
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: buttonColor,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(4),
+                ),
+              ),
+              child: const Text(
+                "Save",
+                style: TextStyle(color: Colors.white),
+              ),
+            ),
           ],
+        );
+      },
+    );
+  }
+
+  Widget _buildGenerateButton() {
+    return SizedBox(
+      width: double.infinity,
+      child: ElevatedButton(
+        onPressed: isLoading ? null : _generateSchedule,
+        style: ElevatedButton.styleFrom(
+          backgroundColor: buttonColor,
+          padding: const EdgeInsets.symmetric(vertical: 16),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(8),
+          ),
+          elevation: 0,
+        ),
+        child: isLoading
+            ? const CircularProgressIndicator(color: Colors.white)
+            : const Text(
+          "Make Schedule",
+          style: TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.bold,
+            color: Colors.white,
+          ),
         ),
       ),
     );
+  }
+
+  Future<void> _generateSchedule() async {
+    if (tasks.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('Please add at least one task'),
+          backgroundColor: Colors.red[400],
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(4),
+          ),
+          margin: const EdgeInsets.all(20),
+        ),
+      );
+      return;
+    }
+
+    setState(() => isLoading = true);
+
+    try {
+      final geminiService = GeminiService();
+      final result = await geminiService.generateSchedule(tasks);
+      setState(() {
+        scheduleResult = result;
+        isLoading = false;
+      });
+    } catch (e) {
+      setState(() => isLoading = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error generating schedule: $e'),
+          backgroundColor: Colors.red[400],
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(4),
+          ),
+          margin: const EdgeInsets.all(20),
+        ),
+      );
+    }
+  }
+
+  Widget _buildScheduleResult() {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.1),
+            blurRadius: 20,
+            offset: const Offset(0, 10),
+          ),
+        ],
+      ),
+      padding: const EdgeInsets.all(24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.calendar_today, color: primaryColor, size: 28),
+              const SizedBox(width: 12),
+              const Text(
+                "Your Schedule",
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
+          Text(
+            scheduleResult.isEmpty
+                ? "No schedule generated yet"
+                : scheduleResult,
+            style: TextStyle(
+              color: secondaryColor,
+              fontSize: 16,
+            ),
+          ),
+          const SizedBox(height: 20),
+          _buildGenerateButton(),
+
+        ],
+      ),
+    );
+  }
+
+  Future<void> _exportSchedule() async {
+    if (scheduleResult.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('No schedule to export'),
+          backgroundColor: Colors.red[400],
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(4),
+          ),
+          margin: const EdgeInsets.all(20),
+        ),
+      );
+      return;
+    }
+
+    final dir = await getTemporaryDirectory();
+    final file = File('${dir.path}/schedule.pdf');
+    final pdf = pw.Document();
+
+    pdf.addPage(
+      pw.Page(
+        build: (pw.Context context) {
+          return pw.Center(
+            child: pw.Text(scheduleResult),
+          );
+        },
+      ),
+    );
+
+    await file.writeAsBytes(await pdf.save());
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: const Text('Schedule exported to PDF'),
+        backgroundColor: Colors.green[400],
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(4),
+        ),
+        margin: const EdgeInsets.all(20),
+      ),
+    );
+  }
+
+  TimeOfDay? _parseTimeOfDay(String timeString) {
+    try {
+      final format = DateFormat("HH:mm"); // Sesuaikan format dengan input waktu
+      final dateTime = format.parse(timeString);
+      return TimeOfDay(hour: dateTime.hour, minute: dateTime.minute);
+    } catch (e) {
+      debugPrint("Error parsing time: $e");
+      return null; // Jika gagal, kembalikan null agar tidak menyebabkan error
+    }
   }
 }
